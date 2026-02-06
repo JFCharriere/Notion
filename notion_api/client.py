@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
 import requests
+
+
+def normalize_id(raw_id: str) -> str:
+    """Convertit un ID Notion (avec ou sans tirets) au format UUID standard."""
+    clean = raw_id.strip().replace("-", "")
+    if len(clean) == 32 and re.fullmatch(r"[0-9a-fA-F]+", clean):
+        return f"{clean[:8]}-{clean[8:12]}-{clean[12:16]}-{clean[16:20]}-{clean[20:]}"
+    return raw_id
 
 from notion_api.config import NOTION_API_VERSION, NOTION_BASE_URL, get_token
 
@@ -34,7 +43,11 @@ class NotionClient:
         self, method: str, endpoint: str, **kwargs: Any
     ) -> dict[str, Any]:
         """Effectue une requête HTTP avec gestion du rate-limiting."""
-        url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        # Normalise les IDs dans l'endpoint (ex: databases/abc123... → databases/abc-123-...)
+        parts = endpoint.lstrip("/").split("/")
+        parts = [normalize_id(p) if len(p.replace("-", "")) == 32 else p for p in parts]
+        endpoint = "/".join(parts)
+        url = f"{self.base_url}/{endpoint}"
         retries = 0
         max_retries = 3
 
