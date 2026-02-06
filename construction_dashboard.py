@@ -21,8 +21,10 @@ from datetime import datetime, date, timedelta
 from typing import Any
 
 from notion_api.client import NotionClient
+from notion_api.blocks import BlockBuilder
 from notion_api.databases import DatabaseManager
 from notion_api.models import extract_property_value
+from notion_api.pages import PageManager
 
 # ============================================================================
 # IDs des bases de données
@@ -481,6 +483,215 @@ class ConstructionDashboard:
         print()
 
     # ========================================================================
+    # 7. Création du dashboard dans Notion
+    # ========================================================================
+    def creer_dans_notion(self, parent_page_id: str, jours_alerte: int = 30) -> str:
+        """Crée le dashboard complet comme page Notion.
+
+        Args:
+            parent_page_id: ID de la page parente dans Notion.
+            jours_alerte: Fenêtre d'alerte en jours.
+
+        Returns:
+            URL de la page créée.
+        """
+        pages = PageManager(self.client)
+        B = BlockBuilder
+
+        aujourd_hui = date.today()
+        titre = f"Dashboard Construction — {aujourd_hui}"
+
+        print(f"{CYAN}Création de la page dashboard dans Notion...{RESET}")
+
+        # -- Créer la page --
+        page = pages.create(
+            parent_page_id=parent_page_id,
+            properties={
+                "title": {
+                    "title": [{"type": "text", "text": {"content": titre}}]
+                }
+            },
+            icon="📊",
+        )
+        page_id = page["id"]
+        page_url = page.get("url", "")
+        print(f"  Page créée : {page_url}")
+
+        # -- Section 1 : Résumé global --
+        budget_total = sum(
+            p.get("Budget alloué", 0) or 0
+            for p in self._postes
+            if isinstance(p.get("Budget alloué"), (int, float))
+        )
+        ecart_total = sum(
+            p.get("Ecart", 0) or 0
+            for p in self._postes
+            if isinstance(p.get("Ecart"), (int, float))
+        )
+        consomme_total = budget_total - ecart_total if budget_total > 0 else 0
+        pct_global = (consomme_total / budget_total * 100) if budget_total > 0 else 0
+
+        nb_retards = len(self.rapport_retards())
+        nb_alertes = len(self.rapport_alertes(jours_alerte))
+        postes_depassement = sum(1 for r in self.rapport_postes() if r["depassement"])
+
+        blocs_resume = [
+            B.heading_1("📊 Résumé global"),
+            B.callout(
+                f"Date du rapport : {aujourd_hui}\n"
+                f"Budget total : {_fmt_chf(budget_total)}\n"
+                f"Consommé : {_fmt_chf(consomme_total)} ({pct_global:.1f}%)\n"
+                f"Écart global : {_fmt_chf(ecart_total)}",
+                icon="💰",
+            ),
+            B.callout(
+                f"{'⚠️' if postes_depassement > 0 else '✅'} {postes_depassement} poste(s) en dépassement\n"
+                f"{'⚠️' if nb_retards > 0 else '✅'} {nb_retards} facture(s) en retard\n"
+                f"{'🔔' if nb_alertes > 0 else '✅'} {nb_alertes} facture(s) à payer sous {jours_alerte} jours",
+                icon="📋",
+            ),
+            B.divider(),
+        ]
+        pages.append_blocks(page_id, blocs_resume)
+        print("  ✓ Résumé global")
+
+        # -- Section 2 : Dépassements par poste --
+        postes = self.rapport_postes()
+        postes_rows = []
+        for r in postes:
+            ecart_val = r["ecart"]
+            pct_val = r["pct_consomme"]
+            postes_rows.append([
+                str(r["poste"]),
+                str(r["code_cfc"] or "—"),
+                _fmt_chf(r["budget"]),
+                _fmt_chf(ecart_val),
+                f"{pct_val:.1f}%" if pct_val is not None else "—",
+                "⚠️ OUI" if r["depassement"] else "✅ Non",
+            ])
+
+        blocs_postes = [B.heading_1("📋 Dépassements par poste de construction")]
+        if postes_rows:
+            blocs_postes.append(B.table(
+                [["Poste", "Code CFC", "Budget", "Écart", "% Consommé", "Dépassement"]]
+                + postes_rows,
+                has_column_header=True,
+            ))
+        else:
+            blocs_postes.append(B.callout("Aucun poste trouvé.", icon="ℹ️"))
+        blocs_postes.append(B.divider())
+        pages.append_blocks(page_id, blocs_postes)
+        print("  ✓ Dépassements par poste")
+
+        # -- Section 3 : Dépassements par code CFC --
+        cfc_data = self.rapport_par_cfc()
+        cfc_rows = []
+        for r in cfc_data:
+            cfc_rows.append([
+                str(r["code_cfc"]),
+                str(r["nb_postes"]),
+                _fmt_chf(r["budget_total"]),
+                _fmt_chf(r["ecart_total"]),
+                f"{r['pct_consomme']:.1f}%" if r["pct_consomme"] is not None else "—",
+            ])
+
+        blocs_cfc = [B.heading_1("🏗️ Dépassements par code CFC")]
+        if cfc_rows:
+            blocs_cfc.append(B.table(
+                [["Code CFC", "Nb postes", "Budget total", "Écart total", "% Consommé"]]
+                + cfc_rows,
+                has_column_header=True,
+            ))
+        else:
+            blocs_cfc.append(B.callout("Aucun code CFC trouvé.", icon="ℹ️"))
+        blocs_cfc.append(B.divider())
+        pages.append_blocks(page_id, blocs_cfc)
+        print("  ✓ Dépassements par CFC")
+
+        # -- Section 4 : Solde par entreprise --
+        entreprises = self.rapport_entreprises()
+        ent_rows = []
+        for r in entreprises:
+            ent_rows.append([
+                str(r["nom"]),
+                _fmt_chf(r["contrats_ttc"]),
+                _fmt_chf(r["total_paye"]),
+                _fmt_chf(r["solde"]),
+                "⚠️" if r["depassement"] else "✅",
+            ])
+
+        blocs_ent = [B.heading_1("🏢 Solde par entreprise & prestataire")]
+        if ent_rows:
+            blocs_ent.append(B.table(
+                [["Entreprise", "Contrats TTC", "Total payé", "Solde", ""]]
+                + ent_rows,
+                has_column_header=True,
+            ))
+        else:
+            blocs_ent.append(B.callout("Aucune entreprise trouvée.", icon="ℹ️"))
+        blocs_ent.append(B.divider())
+        pages.append_blocks(page_id, blocs_ent)
+        print("  ✓ Solde par entreprise")
+
+        # -- Section 5 : Retards de paiement --
+        retards = self.rapport_retards()
+        blocs_retards = [B.heading_1("⏰ Retards de paiement")]
+        if retards:
+            retard_rows = []
+            for r in retards:
+                jours = r["jours_retard"]
+                urgence = "🔴" if jours > 30 else ("🟠" if jours > 14 else "🟡")
+                retard_rows.append([
+                    str(r["numero"]),
+                    _fmt_chf(r["montant_ht"] or r["montant_ttc"]),
+                    str(r["date_echeance"]),
+                    f"{urgence} {jours} jours",
+                    str(r.get("statut", "")),
+                ])
+            blocs_retards.append(B.table(
+                [["N° Facture", "Montant", "Échéance", "Retard", "Statut"]]
+                + retard_rows,
+                has_column_header=True,
+            ))
+        else:
+            blocs_retards.append(
+                B.callout("✅ Aucune facture en retard de paiement.", icon="👍")
+            )
+        blocs_retards.append(B.divider())
+        pages.append_blocks(page_id, blocs_retards)
+        print("  ✓ Retards de paiement")
+
+        # -- Section 6 : Factures à payer --
+        alertes = self.rapport_alertes(jours_alerte)
+        blocs_alertes = [B.heading_1(f"🔔 Factures à payer ({jours_alerte} prochains jours)")]
+        if alertes:
+            alerte_rows = []
+            for r in alertes:
+                jours = r["jours_restants"]
+                urgence = "🔴" if jours <= 7 else ("🟠" if jours <= 14 else "🟢")
+                alerte_rows.append([
+                    str(r["numero"]),
+                    _fmt_chf(r["montant_ht"] or r["montant_ttc"]),
+                    str(r["date_echeance"]),
+                    f"{urgence} {jours} jours",
+                    str(r.get("statut", "")),
+                ])
+            blocs_alertes.append(B.table(
+                [["N° Facture", "Montant", "Échéance", "Dans", "Statut"]]
+                + alerte_rows,
+                has_column_header=True,
+            ))
+        else:
+            blocs_alertes.append(
+                B.callout(f"✅ Aucune facture à payer dans les {jours_alerte} prochains jours.", icon="👍")
+            )
+        pages.append_blocks(page_id, blocs_alertes)
+        print(f"\n{GREEN}{BOLD}Dashboard créé avec succès !{RESET}")
+        print(f"  URL : {page_url}")
+
+        return page_url
+
+    # ========================================================================
     # Export
     # ========================================================================
     def export_csv(self, output_path: str = "dashboard_construction.csv"):
@@ -567,10 +778,18 @@ def main():
         choices=["resume", "postes", "cfc", "entreprises", "retards", "alertes"],
         help="Afficher uniquement une section spécifique",
     )
+    parser.add_argument(
+        "--notion", type=str, metavar="PAGE_ID",
+        help="Créer le dashboard dans Notion (spécifier l'ID de la page parente)",
+    )
 
     args = parser.parse_args()
     dashboard = ConstructionDashboard()
     dashboard.charger_donnees()
+
+    if args.notion:
+        dashboard.creer_dans_notion(args.notion, jours_alerte=args.alerte_jours)
+        return
 
     if args.export == "csv":
         dashboard.export_csv()
