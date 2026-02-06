@@ -188,7 +188,16 @@ def extract_property_value(prop: dict[str, Any]) -> Any:
         return formula.get(formula.get("type", ""))
     if ptype == "rollup":
         rollup = prop.get("rollup", {})
-        return rollup.get(rollup.get("type", ""))
+        rollup_type = rollup.get("type", "")
+        rollup_value = rollup.get(rollup_type)
+        if rollup_type == "array" and isinstance(rollup_value, list):
+            # Extraire récursivement les valeurs de chaque élément du tableau
+            extracted = [extract_property_value(item) for item in rollup_value]
+            # Aplatir en une seule chaîne si ce sont des textes
+            if all(isinstance(v, str) for v in extracted):
+                return ", ".join(v for v in extracted if v)
+            return extracted
+        return rollup_value
     if ptype == "created_time":
         return prop.get("created_time")
     if ptype == "last_edited_time":
