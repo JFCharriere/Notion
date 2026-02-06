@@ -35,9 +35,8 @@ class PageManager:
 
     def get_content(self, page_id: str) -> list[dict[str, Any]]:
         """Récupère tous les blocs enfants (contenu) d'une page."""
-        return self.client.paginated_post(
+        return self.client.paginated_get(
             f"blocks/{page_id}/children",
-            body={},
         )
 
     # -- Création ---------------------------------------------------------------

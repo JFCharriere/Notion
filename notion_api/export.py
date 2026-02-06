@@ -35,8 +35,8 @@ class DataExporter:
 
     def extract_page_content(self, page_id: str) -> list[dict[str, Any]]:
         """Extrait le contenu brut (blocs) d'une page."""
-        return self.client.paginated_post(
-            f"blocks/{page_id}/children", body={}
+        return self.client.paginated_get(
+            f"blocks/{page_id}/children",
         )
 
     def extract_page_as_text(self, page_id: str) -> str:

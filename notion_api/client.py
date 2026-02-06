@@ -100,6 +100,25 @@ class NotionClient:
 
         return results
 
+    def paginated_get(
+        self, endpoint: str
+    ) -> list[dict[str, Any]]:
+        """Effectue une requête GET paginée et retourne tous les résultats."""
+        results: list[dict[str, Any]] = []
+        has_more = True
+        next_cursor: str | None = None
+
+        while has_more:
+            params: dict[str, str] = {}
+            if next_cursor:
+                params["start_cursor"] = next_cursor
+            data = self.get(endpoint, params=params)
+            results.extend(data.get("results", []))
+            has_more = data.get("has_more", False)
+            next_cursor = data.get("next_cursor")
+
+        return results
+
     # -- Raccourcis pratiques ---------------------------------------------------
 
     def search(
