@@ -88,6 +88,9 @@ class ConstructionDashboard:
         self._factures: list[dict] = []
         self._postes: list[dict] = []
         self._entreprises: list[dict] = []
+        # Maps calculées à partir des factures
+        self._facture_par_poste: dict[str, float] = {}  # poste_id → total facturé HT
+        self._facture_par_entreprise: dict[str, float] = {}  # entreprise_id → total facturé HT
 
     def charger_donnees(self):
         """Charge toutes les données depuis Notion."""
@@ -98,7 +101,39 @@ class ConstructionDashboard:
         print(f"  🧾 {len(self._factures)} factures")
         self._entreprises = self.db.query_as_dicts(DB_ENTREPRISES)
         print(f"  🏢 {len(self._entreprises)} entreprises")
+
+        # Calculer les totaux facturés par poste et par entreprise
+        self._calculer_totaux_factures()
         print()
+
+    def _calculer_totaux_factures(self):
+        """Calcule les montants facturés agrégés par poste et par entreprise."""
+        self._facture_par_poste = {}
+        self._facture_par_entreprise = {}
+
+        for fact in self._factures:
+            # Montant : prendre HT d'abord, sinon TTC
+            montant = fact.get("Montant HT (CHF)")
+            if not isinstance(montant, (int, float)):
+                montant = fact.get("Montant TTC (CHF)")
+            if not isinstance(montant, (int, float)):
+                montant = 0
+
+            # Agréger par poste (relation = liste d'IDs)
+            postes_ids = fact.get("Poste", [])
+            if isinstance(postes_ids, list):
+                for pid in postes_ids:
+                    self._facture_par_poste[pid] = self._facture_par_poste.get(pid, 0) + montant
+            elif isinstance(postes_ids, str) and postes_ids:
+                self._facture_par_poste[postes_ids] = self._facture_par_poste.get(postes_ids, 0) + montant
+
+            # Agréger par entreprise (relation = liste d'IDs)
+            ent_ids = fact.get("🏢 Entreprises & Prestataires", [])
+            if isinstance(ent_ids, list):
+                for eid in ent_ids:
+                    self._facture_par_entreprise[eid] = self._facture_par_entreprise.get(eid, 0) + montant
+            elif isinstance(ent_ids, str) and ent_ids:
+                self._facture_par_entreprise[ent_ids] = self._facture_par_entreprise.get(ent_ids, 0) + montant
 
     # ========================================================================
     # 1. Dépassements de budget par Poste de Construction
@@ -108,26 +143,35 @@ class ConstructionDashboard:
         resultats = []
         for poste in self._postes:
             budget = poste.get("Budget alloué")
-            ecart = poste.get("Ecart")
-            pct_consomme = poste.get("% Consommé")
-            alerte = poste.get("Alerte budget")
             nom = poste.get("N° Poste", "?")
             desc = poste.get("Description", "")
+            poste_id = poste.get("id", "")
 
             # Extraire le libellé CFC (rollup)
             cfc = poste.get("Libellé Code CFC", "")
             if isinstance(cfc, list):
                 cfc = ", ".join(str(c) for c in cfc)
 
+            # Calcul depuis les factures réelles
+            total_facture = self._facture_par_poste.get(poste_id, 0)
+            budget_num = float(budget) if isinstance(budget, (int, float)) else 0
+
+            if budget_num > 0:
+                pct_consomme = (total_facture / budget_num) * 100
+                ecart = budget_num - total_facture
+            else:
+                pct_consomme = None
+                ecart = -total_facture if total_facture > 0 else None
+
             resultats.append({
                 "poste": nom,
                 "description": desc,
                 "code_cfc": cfc,
-                "budget": budget,
+                "budget": budget_num if budget_num > 0 else budget,
+                "total_facture": total_facture,
                 "ecart": ecart,
                 "pct_consomme": pct_consomme,
-                "alerte": alerte,
-                "depassement": (ecart is not None and isinstance(ecart, (int, float)) and ecart < 0),
+                "depassement": (ecart is not None and ecart < 0),
             })
 
         # Trier : dépassements d'abord, puis par % consommé décroissant
@@ -153,19 +197,20 @@ class ConstructionDashboard:
         else:
             print(f"\n{GREEN}✓ Aucun dépassement de budget détecté.{RESET}\n")
 
-        print(f"  {'Poste':<25} {'Code CFC':<20} {'Budget':<18} {'Écart':<18} {'% Cons.':<10}")
-        print(f"  {'─'*25} {'─'*20} {'─'*18} {'─'*18} {'─'*10}")
+        print(f"  {'Poste':<20} {'Code CFC':<18} {'Budget':<16} {'Facturé':<16} {'Écart':<16} {'% Cons.':<10}")
+        print(f"  {'─'*20} {'─'*18} {'─'*16} {'─'*16} {'─'*16} {'─'*10}")
 
         for r in resultats:
             ecart_str = _fmt_chf(r["ecart"])
             if r["depassement"]:
                 ecart_str = f"{RED}{ecart_str}{RESET}"
 
-            nom = str(r["poste"])[:24]
-            cfc = str(r["code_cfc"])[:19]
+            nom = str(r["poste"])[:19]
+            cfc = str(r["code_cfc"])[:17]
             print(
-                f"  {nom:<25} {cfc:<20} {_fmt_chf(r['budget']):<18} "
-                f"{ecart_str:<28} {_color_pct(r['pct_consomme'])}"
+                f"  {nom:<20} {cfc:<18} {_fmt_chf(r['budget']):<16} "
+                f"{_fmt_chf(r['total_facture']):<16} "
+                f"{ecart_str:<26} {_color_pct(r['pct_consomme'])}"
             )
 
         print()
@@ -174,7 +219,7 @@ class ConstructionDashboard:
     # 2. Dépassements par Code CFC (agrégé)
     # ========================================================================
     def rapport_par_cfc(self) -> list[dict]:
-        """Agrège les budgets et écarts par code CFC."""
+        """Agrège les budgets et factures par code CFC."""
         cfc_map: dict[str, dict] = {}
 
         for poste in self._postes:
@@ -184,25 +229,27 @@ class ConstructionDashboard:
             cfc = cfc or "Non classé"
 
             if cfc not in cfc_map:
-                cfc_map[cfc] = {"budget_total": 0, "ecart_total": 0, "nb_postes": 0}
+                cfc_map[cfc] = {"budget_total": 0, "total_facture": 0, "nb_postes": 0}
 
             budget = poste.get("Budget alloué")
-            ecart = poste.get("Ecart")
+            poste_id = poste.get("id", "")
+            total_facture = self._facture_par_poste.get(poste_id, 0)
 
             if isinstance(budget, (int, float)):
                 cfc_map[cfc]["budget_total"] += budget
-            if isinstance(ecart, (int, float)):
-                cfc_map[cfc]["ecart_total"] += ecart
+            cfc_map[cfc]["total_facture"] += total_facture
             cfc_map[cfc]["nb_postes"] += 1
 
         resultats = []
         for cfc, data in cfc_map.items():
             budget_total = data["budget_total"]
-            ecart_total = data["ecart_total"]
-            pct = ((budget_total - ecart_total) / budget_total * 100) if budget_total > 0 else None
+            total_facture = data["total_facture"]
+            ecart_total = budget_total - total_facture
+            pct = (total_facture / budget_total * 100) if budget_total > 0 else None
             resultats.append({
                 "code_cfc": cfc,
                 "budget_total": budget_total,
+                "total_facture": total_facture,
                 "ecart_total": ecart_total,
                 "pct_consomme": pct,
                 "nb_postes": data["nb_postes"],
@@ -226,18 +273,19 @@ class ConstructionDashboard:
         else:
             print(f"\n{GREEN}✓ Aucun dépassement par code CFC.{RESET}\n")
 
-        print(f"  {'Code CFC':<30} {'Postes':<8} {'Budget total':<18} {'Écart total':<18} {'% Cons.':<10}")
-        print(f"  {'─'*30} {'─'*8} {'─'*18} {'─'*18} {'─'*10}")
+        print(f"  {'Code CFC':<25} {'Postes':<8} {'Budget total':<16} {'Facturé':<16} {'Écart total':<16} {'% Cons.':<10}")
+        print(f"  {'─'*25} {'─'*8} {'─'*16} {'─'*16} {'─'*16} {'─'*10}")
 
         for r in resultats:
             ecart_str = _fmt_chf(r["ecart_total"])
             if r["depassement"]:
                 ecart_str = f"{RED}{ecart_str}{RESET}"
 
-            cfc = str(r["code_cfc"])[:29]
+            cfc = str(r["code_cfc"])[:24]
             print(
-                f"  {cfc:<30} {r['nb_postes']:<8} {_fmt_chf(r['budget_total']):<18} "
-                f"{ecart_str:<28} {_color_pct(r['pct_consomme'])}"
+                f"  {cfc:<25} {r['nb_postes']:<8} {_fmt_chf(r['budget_total']):<16} "
+                f"{_fmt_chf(r['total_facture']):<16} "
+                f"{ecart_str:<26} {_color_pct(r['pct_consomme'])}"
             )
 
         print()
@@ -439,22 +487,18 @@ class ConstructionDashboard:
         print(f"{BOLD}{'='*80}{RESET}")
         print(f"  Date du rapport : {date.today()}\n")
 
-        # Budget total
+        # Budget total et factures
         budget_total = sum(
             p.get("Budget alloué", 0) or 0
             for p in self._postes
             if isinstance(p.get("Budget alloué"), (int, float))
         )
-        ecart_total = sum(
-            p.get("Ecart", 0) or 0
-            for p in self._postes
-            if isinstance(p.get("Ecart"), (int, float))
-        )
-        consomme_total = budget_total - ecart_total if budget_total > 0 else 0
-        pct_global = (consomme_total / budget_total * 100) if budget_total > 0 else 0
+        total_facture = sum(self._facture_par_poste.values())
+        ecart_total = budget_total - total_facture
+        pct_global = (total_facture / budget_total * 100) if budget_total > 0 else 0
 
         print(f"  💰 Budget total alloué :  {_fmt_chf(budget_total)}")
-        print(f"  💸 Total consommé :       {_fmt_chf(consomme_total)}")
+        print(f"  🧾 Total facturé :        {_fmt_chf(total_facture)}")
         ecart_color = RED if ecart_total < 0 else GREEN
         print(f"  📐 Écart global :         {ecart_color}{_fmt_chf(ecart_total)}{RESET}")
         print(f"  📊 % Consommé global :    {_color_pct(pct_global)}")
@@ -523,13 +567,9 @@ class ConstructionDashboard:
             for p in self._postes
             if isinstance(p.get("Budget alloué"), (int, float))
         )
-        ecart_total = sum(
-            p.get("Ecart", 0) or 0
-            for p in self._postes
-            if isinstance(p.get("Ecart"), (int, float))
-        )
-        consomme_total = budget_total - ecart_total if budget_total > 0 else 0
-        pct_global = (consomme_total / budget_total * 100) if budget_total > 0 else 0
+        total_facture = sum(self._facture_par_poste.values())
+        ecart_total = budget_total - total_facture
+        pct_global = (total_facture / budget_total * 100) if budget_total > 0 else 0
 
         nb_retards = len(self.rapport_retards())
         nb_alertes = len(self.rapport_alertes(jours_alerte))
@@ -540,7 +580,7 @@ class ConstructionDashboard:
             B.callout(
                 f"Date du rapport : {aujourd_hui}\n"
                 f"Budget total : {_fmt_chf(budget_total)}\n"
-                f"Consommé : {_fmt_chf(consomme_total)} ({pct_global:.1f}%)\n"
+                f"Total facturé : {_fmt_chf(total_facture)} ({pct_global:.1f}%)\n"
                 f"Écart global : {_fmt_chf(ecart_total)}",
                 icon="💰",
             ),
@@ -565,6 +605,7 @@ class ConstructionDashboard:
                 str(r["poste"]),
                 str(r["code_cfc"] or "—"),
                 _fmt_chf(r["budget"]),
+                _fmt_chf(r["total_facture"]),
                 _fmt_chf(ecart_val),
                 f"{pct_val:.1f}%" if pct_val is not None else "—",
                 "⚠️ OUI" if r["depassement"] else "✅ Non",
@@ -573,7 +614,7 @@ class ConstructionDashboard:
         blocs_postes = [B.heading_1("📋 Dépassements par poste de construction")]
         if postes_rows:
             blocs_postes.append(B.table(
-                [["Poste", "Code CFC", "Budget", "Écart", "% Consommé", "Dépassement"]]
+                [["Poste", "Code CFC", "Budget", "Facturé", "Écart", "% Consommé", "Dépassement"]]
                 + postes_rows,
                 has_column_header=True,
             ))
@@ -591,6 +632,7 @@ class ConstructionDashboard:
                 str(r["code_cfc"]),
                 str(r["nb_postes"]),
                 _fmt_chf(r["budget_total"]),
+                _fmt_chf(r["total_facture"]),
                 _fmt_chf(r["ecart_total"]),
                 f"{r['pct_consomme']:.1f}%" if r["pct_consomme"] is not None else "—",
             ])
@@ -598,7 +640,7 @@ class ConstructionDashboard:
         blocs_cfc = [B.heading_1("🏗️ Dépassements par code CFC")]
         if cfc_rows:
             blocs_cfc.append(B.table(
-                [["Code CFC", "Nb postes", "Budget total", "Écart total", "% Consommé"]]
+                [["Code CFC", "Nb postes", "Budget total", "Facturé", "Écart total", "% Consommé"]]
                 + cfc_rows,
                 has_column_header=True,
             ))
