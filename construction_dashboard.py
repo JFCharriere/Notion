@@ -112,10 +112,10 @@ class ConstructionDashboard:
         self._facture_par_entreprise = {}
 
         for fact in self._factures:
-            # Montant : prendre HT d'abord, sinon TTC
-            montant = fact.get("Montant HT (CHF)")
+            # Montant : prendre TTC d'abord, sinon HT
+            montant = fact.get("Montant TTC (CHF)")
             if not isinstance(montant, (int, float)):
-                montant = fact.get("Montant TTC (CHF)")
+                montant = fact.get("Montant HT (CHF)")
             if not isinstance(montant, (int, float)):
                 montant = 0
 
